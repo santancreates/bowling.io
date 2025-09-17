@@ -2,36 +2,103 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Bowling.io Test</title>
+  <title>Bowling.io — Scoreboard MVP</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    .row { display:flex; gap:8px; flex-wrap: wrap; margin-bottom:12px; }
+    input, button { padding:8px 10px; font-size:14px; }
+    ul { padding-left: 18px; }
+    .me { font-weight: 600; }
+  </style>
 </head>
 <body>
-  <h1>🎳 Hello Bowling.io!</h1>
-  <p>If you see this, hosting works ✅</p>
-  <p id="status">Connecting to Firebase...</p>
+  <h1>🎳 Bowling.io — Shared Scoreboard</h1>
 
-  <!-- Firebase SDKs -->
+  <div class="row">
+    <input id="room" placeholder="Room code (e.g. PINS)" maxlength="12" />
+    <input id="name" placeholder="Your name" maxlength="16" />
+    <button id="join">Join room</button>
+    <button id="leave" disabled>Leave room</button>
+  </div>
+
+  <p id="status">Not connected.</p>
+
+  <h3>Players in room</h3>
+  <ul id="players"></ul>
+
   <script type="module">
-    // paste your firebaseConfig from Firebase here
+    /* === Firebase config (yours) === */
     const firebaseConfig = {
       apiKey: "AIzaSyBkYVHaeXW7q9V1hYJZkxVn4bulcDKR27w",
       authDomain: "bowling-io.firebaseapp.com",
       projectId: "bowling-io",
       storageBucket: "bowling-io.firebasestorage.app",
-      messagingSenderId: “266335326459",
-      appId: "1:266335326459:web:b8907a31fa405b1d20605e"
+      messagingSenderId: "266335326459",
+      appId: "1:266335326459:web:b8907a31fa405b1d20605e",
+      measurementId: "G-SMLJ3ZF044"
     };
 
+    /* === SDKs === */
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
-    import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
+    import {
+      getFirestore, collection, doc, setDoc, deleteDoc,
+      onSnapshot, serverTimestamp
+    } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
 
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
 
-    // simple test: write + read from Firestore
-    const testRef = doc(db, "test", "hello");
-    await setDoc(testRef, { msg: "Hello from Bowling.io!" });
-    const snap = await getDoc(testRef);
-    document.getElementById("status").textContent = "Firestore says: " + snap.data().msg;
+    /* === UI helpers === */
+    const $ = (id)=>document.getElementById(id);
+    const roomEl = $("room"), nameEl = $("name");
+    const statusEl = $("status"), playersEl = $("players");
+    const joinBtn = $("join"), leaveBtn = $("leave");
+    const myId = crypto.randomUUID();
+    let unsub = null;
+    let currentRoom = null;
+
+    const roomPlayersCol = (roomCode) =>
+      collection(db, "rooms", roomCode.toUpperCase(), "players");
+
+    /* Join a room */
+    joinBtn.addEventListener("click", async () => {
+      const room = roomEl.value.trim().toUpperCase();
+      const name = nameEl.value.trim() || "Player";
+      if (!room) { alert("Enter a room code"); return; }
+
+      const pRef = doc(roomPlayersCol(room), myId);
+      await setDoc(pRef, { id: myId, name, joinedAt: serverTimestamp() });
+
+      if (unsub) unsub();
+      unsub = onSnapshot(roomPlayersCol(room), (snap) => {
+        const players = [];
+        snap.forEach(d => players.push(d.data()));
+        playersEl.innerHTML = players
+          .sort((a,b)=> (a.joinedAt?.seconds||0) - (b.joinedAt?.seconds||0))
+          .map(p => `<li class="${p.id===myId?'me':''}">${p.name}${p.id===myId?' (you)':''}</li>`)
+          .join("");
+        statusEl.textContent = `Connected to room ${room}. Players: ${players.length}`;
+      });
+
+      currentRoom = room;
+      joinBtn.disabled = true;
+      leaveBtn.disabled = false;
+      statusEl.textContent = `Joined room ${room}. Waiting for others…`;
+    });
+
+    /* Leave room + cleanup */
+    async function leaveRoom(){
+      if (!currentRoom) return;
+      try { await deleteDoc(doc(roomPlayersCol(currentRoom), myId)); } catch {}
+      if (unsub) { unsub(); unsub = null; }
+      currentRoom = null;
+      playersEl.innerHTML = "";
+      statusEl.textContent = "Not connected.";
+      joinBtn.disabled = false;
+      leaveBtn.disabled = true;
+    }
+    leaveBtn.addEventListener("click", leaveRoom);
+    window.addEventListener("beforeunload", leaveRoom);
   </script>
 </body>
 </html>
