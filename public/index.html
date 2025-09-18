@@ -2,32 +2,51 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Bowling.io — Scoreboard MVP</title>
+  <title>Bowling.io — Basic MVP</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
     .row { display:flex; gap:8px; flex-wrap: wrap; margin-bottom:12px; }
     input, button { padding:8px 10px; font-size:14px; }
-    ul { padding-left: 18px; }
-    .me { font-weight: 600; }
+    button[disabled] { opacity:.6; cursor:not-allowed; }
+    table { border-collapse: collapse; width:100%; max-width: 980px; }
+    th, td { border:1px solid #ddd; padding:6px 8px; text-align:center; }
+    th { background:#f7f7f7; }
+    .you { font-weight:600; }
+    .turn { background:#ffeeba; }
+    .status { margin:8px 0; }
+    .small { font-size: 12px; color:#555; }
+    #playersWrap > div { padding:6px 10px; border:1px solid #ddd; border-radius:6px; }
   </style>
 </head>
 <body>
-  <h1>🎳 Bowling.io — Shared Scoreboard</h1>
+  <h1>🎳 Bowling.io — Basic MVP (turn-based)</h1>
 
+  <!-- Lobby -->
   <div class="row">
     <input id="room" placeholder="Room code (e.g. PINS)" maxlength="12" />
     <input id="name" placeholder="Your name" maxlength="16" />
     <button id="join">Join room</button>
     <button id="leave" disabled>Leave room</button>
+    <button id="start" disabled>Start game</button>
+    <label class="small"><input id="short" type="checkbox" /> Short game (5 frames)</label>
   </div>
 
-  <p id="status">Not connected.</p>
+  <!-- Turn controls -->
+  <div class="row">
+    <button id="roll" disabled>Roll 🎳</button>
+    <span id="whoseTurn" class="status">Not connected.</span>
+  </div>
 
-  <h3>Players in room</h3>
-  <ul id="players"></ul>
+  <!-- Players list -->
+  <div id="playersWrap" class="row"></div>
+
+  <!-- Scoreboard -->
+  <h3>Scoreboard</h3>
+  <div class="small">Scoring: strikes (X), spares (/), open frames (-).</div>
+  <div id="board"></div>
 
   <script type="module">
-    /* === Firebase config (yours) === */
+    /* ===== Firebase config (yours) ===== */
     const firebaseConfig = {
       apiKey: "AIzaSyBkYVHaeXW7q9V1hYJZkxVn4bulcDKR27w",
       authDomain: "bowling-io.firebaseapp.com",
@@ -38,67 +57,355 @@
       measurementId: "G-SMLJ3ZF044"
     };
 
-    /* === SDKs === */
+    /* ===== Firebase SDKs ===== */
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
     import {
-      getFirestore, collection, doc, setDoc, deleteDoc,
-      onSnapshot, serverTimestamp
+      getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, runTransaction,
+      onSnapshot, collection, getDocs, serverTimestamp
     } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
 
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
 
-    /* === UI helpers === */
+    /* ===== Helpers & UI refs ===== */
     const $ = (id)=>document.getElementById(id);
     const roomEl = $("room"), nameEl = $("name");
-    const statusEl = $("status"), playersEl = $("players");
-    const joinBtn = $("join"), leaveBtn = $("leave");
+    const joinBtn = $("join"), leaveBtn = $("leave"), startBtn = $("start"), shortChk=$("short");
+    const rollBtn = $("roll"), whoseTurnEl = $("whoseTurn");
+    const playersWrap = $("playersWrap"), boardDiv = $("board");
+
     const myId = crypto.randomUUID();
-    let unsub = null;
     let currentRoom = null;
+    let unsubRoom = null;
 
-    const roomPlayersCol = (roomCode) =>
-      collection(db, "rooms", roomCode.toUpperCase(), "players");
+    const roomDoc = (room) => doc(db, "rooms", room);
+    const playersCol = (room) => collection(db, "rooms", room, "players");
 
-    /* Join a room */
+    /* ===== Scoring utilities ===== */
+    function computeTotals(frames) {
+      // frames: array length 10, each is an array of rolls (10th may have 3)
+      const flat = [];
+      for (let i = 0; i < 9; i++) flat.push(...(frames[i]||[]));
+      flat.push(...(frames[9]||[]));
+
+      let total = 0, idx = 0;
+      const totals = [];
+
+      for (let f = 0; f < 10; f++) {
+        if (f < 9 && flat[idx] === 10) { // strike
+          const bonus = (flat[idx+1] ?? 0) + (flat[idx+2] ?? 0);
+          total += 10 + bonus; totals.push(total); idx += 1; continue;
+        }
+        if (f < 9) {
+          const r1 = flat[idx] ?? 0, r2 = flat[idx+1] ?? 0;
+          const sum = r1 + r2;
+          total += (sum === 10) ? (10 + (flat[idx+2] ?? 0)) : sum;
+          totals.push(total); idx += 2; continue;
+        }
+        const tenth = (frames[9]||[]).reduce((a,b)=>a+b,0);
+        total += tenth; totals.push(total);
+      }
+      return totals;
+    }
+
+    function frameSymbol(rolls, fIndex) {
+      if (!rolls || rolls.length===0) return ["",""];
+      if (fIndex < 9) {
+        if (rolls[0] === 10) return ["X",""];
+        const r1 = rolls[0], r2 = rolls[1] ?? null;
+        if (r2 === null) return [r1.toString(), ""];
+        if (r1 + r2 === 10) return [r1.toString(), "/"];
+        return [r1.toString(), (r2===0? "-": r2.toString())];
+      } else {
+        const out = [];
+        for (let i=0;i<rolls.length;i++){
+          const r = rolls[i];
+          if (r === 10) out.push("X");
+          else if (i===1 && (rolls[0]??0)!==10 && ((rolls[0]??0)+r===10)) out.push("/");
+          else out.push(r===0? "-": String(r));
+        }
+        return [out[0]||"", out[1]||"", out[2]||""];
+      }
+    }
+
+    /* ===== Renderers ===== */
+    function renderPlayers(players, order, turnIndex) {
+      playersWrap.innerHTML = "";
+      const byId = new Map(players.map(p=>[p.id,p]));
+      const arranged = order.map(id=>byId.get(id)).filter(Boolean);
+      arranged.forEach((p, idx) => {
+        const div = document.createElement("div");
+        div.textContent = `${idx+1}. ${p.name}${p.id===myId ? " (you)" : ""}`;
+        div.className = (idx===turnIndex?"turn ":"") + (p.id===myId?" you":"");
+        playersWrap.appendChild(div);
+      });
+    }
+
+    function renderBoard(state) {
+      const players = state.players || [];
+      const order = state.order || [];
+      const scorecards = state.scorecards || {};
+
+      let html = "<table><thead><tr><th>Player</th>";
+      const F = state.frames || 10;
+      for (let i=1;i<=F;i++) html += `<th>F${i}</th>`;
+      html += "<th>Total</th></tr></thead><tbody>";
+
+      order.forEach(pid => {
+        const name = (players.find(p=>p.id===pid)?.name)||pid.slice(0,6);
+
+        // READ-ONLY: convert object -> array[10] for compute/display
+        const framesObj = scorecards[pid] || {};
+        const frames = [];
+        for (let i=0;i<10;i++) frames[i] = framesObj[i] || [];
+
+        const totals = computeTotals(frames);
+
+        html += `<tr${pid===state.order[state.turnIndex] && state.status==="playing" ? ' class="turn"':''}>`;
+        html += `<td>${name}${pid===myId?" (you)":""}</td>`;
+
+        for (let f=0; f< (state.frames||10); f++) {
+          const sym = frameSymbol(frames[f], f);
+          if (f < 9) html += `<td>${sym[0]||""} ${sym[1]||""}</td>`;
+          else html += `<td>${(sym[0]||"")}&nbsp;${(sym[1]||"")}&nbsp;${(sym[2]||"")}</td>`;
+        }
+        html += `<td>${totals[totals.length-1]||0}</td>`;
+        html += "</tr>";
+      });
+
+      html += "</tbody></table>";
+      boardDiv.innerHTML = html;
+    }
+
+    function setLobbyButtonsEnabled(joined, amHost, canStart) {
+      joinBtn.disabled = joined;
+      leaveBtn.disabled = !joined;
+      startBtn.disabled = !amHost || !canStart;
+      rollBtn.disabled = true;
+    }
+
+    /* ===== Join / Leave ===== */
     joinBtn.addEventListener("click", async () => {
       const room = roomEl.value.trim().toUpperCase();
       const name = nameEl.value.trim() || "Player";
       if (!room) { alert("Enter a room code"); return; }
 
-      const pRef = doc(roomPlayersCol(room), myId);
-      await setDoc(pRef, { id: myId, name, joinedAt: serverTimestamp() });
+      // Create room doc if missing
+      await setDoc(roomDoc(room), {
+        status: "waiting",
+        frames: shortChk.checked ? 5 : 10,
+        hostId: myId,
+        order: [],
+        turnIndex: 0,
+        frameIndex: 0,
+        scorecards: {},     // object keyed by playerId, each value is { "0":[], "1":[], ... }
+        lastUpdate: serverTimestamp()
+      }, { merge: true });
 
-      if (unsub) unsub();
-      unsub = onSnapshot(roomPlayersCol(room), (snap) => {
-        const players = [];
-        snap.forEach(d => players.push(d.data()));
-        playersEl.innerHTML = players
-          .sort((a,b)=> (a.joinedAt?.seconds||0) - (b.joinedAt?.seconds||0))
-          .map(p => `<li class="${p.id===myId?'me':''}">${p.name}${p.id===myId?' (you)':''}</li>`)
-          .join("");
-        statusEl.textContent = `Connected to room ${room}. Players: ${players.length}`;
+      // Add me to players subcollection
+      await setDoc(doc(playersCol(room), myId), {
+        id: myId, name, joinedAt: serverTimestamp()
       });
 
       currentRoom = room;
-      joinBtn.disabled = true;
-      leaveBtn.disabled = false;
-      statusEl.textContent = `Joined room ${room}. Waiting for others…`;
+      subscribeRoom(room);
+      whoseTurnEl.textContent = `Joined room ${room}. Waiting…`;
     });
 
-    /* Leave room + cleanup */
-    async function leaveRoom(){
+    leaveBtn.addEventListener("click", async () => {
       if (!currentRoom) return;
-      try { await deleteDoc(doc(roomPlayersCol(currentRoom), myId)); } catch {}
-      if (unsub) { unsub(); unsub = null; }
+      try { await deleteDoc(doc(playersCol(currentRoom), myId)); } catch {}
+      if (unsubRoom) { unsubRoom(); unsubRoom = null; }
       currentRoom = null;
-      playersEl.innerHTML = "";
-      statusEl.textContent = "Not connected.";
-      joinBtn.disabled = false;
-      leaveBtn.disabled = true;
+      boardDiv.innerHTML = "";
+      playersWrap.innerHTML = "";
+      whoseTurnEl.textContent = "Not connected.";
+      setLobbyButtonsEnabled(false,false,false);
+    });
+
+    /* ===== Start Game (host only) ===== */
+    startBtn.addEventListener("click", async () => {
+      if (!currentRoom) return;
+      await runTransaction(db, async (tx) => {
+        const rRef = roomDoc(currentRoom);
+        const snap = await tx.get(rRef);
+        const data = snap.data();
+        if (!data) throw new Error("Room missing");
+        if (data.hostId !== myId) throw new Error("Only host can start");
+        if (data.status !== "waiting") return;
+
+        // Gather players
+        const ps = await getDocs(playersCol(currentRoom));
+        const players = [];
+        ps.forEach(d=>players.push(d.data()));
+        if (players.length < 1) throw new Error("Need at least 1 player");
+
+        // Random order
+        players.sort(()=>Math.random()-0.5);
+        const order = players.map(p=>p.id);
+
+        // Init empty scorecards (object of arrays per frame)
+        const scorecards = {};
+        for (const p of order) {
+          const frames = {};
+          for (let i=0; i<10; i++) frames[i] = [];
+          scorecards[p] = frames;
+        }
+
+        tx.update(rRef, {
+          status: "playing",
+          frames: data.frames || 10,
+          order,
+          turnIndex: 0,
+          frameIndex: 0,
+          scorecards,
+          lastUpdate: serverTimestamp()
+        });
+      }).catch(e=>alert(e.message));
+    });
+
+    /* ===== Roll (only current player) ===== */
+    rollBtn.addEventListener("click", async () => {
+      if (!currentRoom) return;
+      try {
+        await runTransaction(db, async (tx) => {
+          const rRef = roomDoc(currentRoom);
+          const snap = await tx.get(rRef);
+          const st = snap.data();
+          if (!st) throw new Error("Room missing");
+          if (st.status !== "playing") throw new Error("Not playing");
+          const order = st.order||[];
+          if (order.length===0) throw new Error("No players");
+          const curPid = order[st.turnIndex];
+          if (curPid !== myId) throw new Error("Not your turn");
+
+          const F = st.frames||10;
+          const fIndex = st.frameIndex||0;
+
+          // READ current player's frames as object
+          const frames = st.scorecards[curPid] || {};
+          const thisFrame = frames[fIndex] || [];
+
+          // Pins remaining
+          let pinsRemaining = 10;
+          if (fIndex < 9) {
+            if (thisFrame.length === 0) pinsRemaining = 10;
+            else if (thisFrame.length === 1) pinsRemaining = Math.max(0, 10 - thisFrame[0]);
+          } else {
+            // 10th frame
+            if (thisFrame.length === 0) pinsRemaining = 10;
+            else if (thisFrame.length === 1) {
+              pinsRemaining = (thisFrame[0]===10) ? 10 : Math.max(0, 10 - thisFrame[0]);
+            } else if (thisFrame.length === 2) {
+              const r1=thisFrame[0], r2=thisFrame[1];
+              pinsRemaining = ((r1===10) || (r1+r2===10)) ? 10 : 0;
+            } else pinsRemaining = 0;
+          }
+
+          // Random pins knocked 0..pinsRemaining
+          const knocked = randInt(0, pinsRemaining, (pinsRemaining>=7)? 0.6 : 0.5);
+
+          // UPDATE frame -> frames -> scorecards
+          thisFrame.push(knocked);
+          frames[fIndex] = thisFrame;       // put frame back
+          st.scorecards[curPid] = frames;   // put frames back
+
+          // Turn advance
+          let nextTurnIndex = st.turnIndex;
+          let nextFrameIndex = st.frameIndex;
+
+          if (fIndex < 9) {
+            if (thisFrame[0] === 10) { // strike
+              nextTurnIndex = (st.turnIndex + 1) % order.length;
+              if (nextTurnIndex === 0) nextFrameIndex = st.frameIndex + 1;
+            } else if (thisFrame.length === 2) {
+              nextTurnIndex = (st.turnIndex + 1) % order.length;
+              if (nextTurnIndex === 0) nextFrameIndex = st.frameIndex + 1;
+            }
+          } else {
+            // 10th
+            if (thisFrame.length === 2) {
+              const r1=thisFrame[0], r2=thisFrame[1];
+              const allowThird = (r1===10) || (r1+r2===10);
+              if (!allowThird) {
+                nextTurnIndex = (st.turnIndex + 1) % order.length;
+                if (nextTurnIndex === 0) st.status = "finished";
+              }
+            } else if (thisFrame.length === 3) {
+              nextTurnIndex = (st.turnIndex + 1) % order.length;
+              if (nextTurnIndex === 0) st.status = "finished";
+            }
+          }
+
+          tx.update(rRef, {
+            scorecards: st.scorecards,
+            turnIndex: nextTurnIndex,
+            frameIndex: nextFrameIndex,
+            status: st.status,
+            lastUpdate: serverTimestamp()
+          });
+        });
+      } catch (e) {
+        alert(e.message);
+      }
+    });
+
+    /* ===== Subscriptions ===== */
+    function subscribeRoom(room) {
+      if (unsubRoom) unsubRoom();
+      unsubRoom = onSnapshot(roomDoc(room), async (snap) => {
+        const st = snap.data() || {};
+
+        // fetch players (names)
+        const ps = await getDocs(playersCol(room));
+        const players = []; ps.forEach(d=>players.push(d.data()));
+        st.players = players;
+
+        const joined = !!currentRoom;
+        const amHost = st.hostId === myId;
+        const canStart = (st.status === "waiting") && (players.length >= 1);
+
+        // buttons
+        joinBtn.disabled = joined;
+        leaveBtn.disabled = !joined;
+        startBtn.disabled = !amHost || !canStart;
+
+        // roll enabled?
+        rollBtn.disabled = !(st.status==="playing" && (st.order?.[st.turnIndex]===myId));
+
+        // status line
+        let msg = "";
+        if (st.status==="waiting") msg = "Waiting to start…";
+        else if (st.status==="playing") {
+          const curPid = st.order?.[st.turnIndex];
+          const curName = players.find(p=>p.id===curPid)?.name || curPid?.slice(0,6) || "—";
+          msg = `Turn: ${curName} · Frame ${Math.min((st.frameIndex||0)+1, st.frames||10)} of ${st.frames||10}`;
+        } else if (st.status==="finished") {
+          const totals = (st.order||[]).map(pid=>{
+            const fObj = (st.scorecards?.[pid])||{};
+            const fArr = []; for (let i=0;i<10;i++) fArr[i]=fObj[i]||[];
+            const t = computeTotals(fArr);
+            return { pid, total: t[t.length-1]||0 };
+          }).sort((a,b)=>b.total-a.total);
+          const winner = totals[0];
+          const wName = players.find(p=>p.id===winner.pid)?.name || winner.pid.slice(0,6);
+          msg = `Game over — Winner: ${wName} (${winner.total})`;
+          rollBtn.disabled = true;
+        } else msg = "Room ready.";
+
+        whoseTurnEl.textContent = msg;
+
+        renderPlayers(players, st.order||[], st.turnIndex||0);
+        renderBoard(st);
+      });
     }
-    leaveBtn.addEventListener("click", leaveRoom);
-    window.addEventListener("beforeunload", leaveRoom);
+
+    /* ===== Small utils ===== */
+    function randInt(min, max, bias=0.5){
+      const r = Math.pow(Math.random(), 1 - (bias-0.5)*1.6);
+      return Math.floor(min + (max - min + 1) * Math.min(1, Math.max(0, r)));
+    }
+
   </script>
 </body>
 </html>

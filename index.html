@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ludo.io (MVP)</title>
+  <style>
+    :root { --line:#cbd5e1; --muted:#64748b; --ink:#0f172a; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; color: var(--ink); }
+    .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+    input,button{ padding:8px 10px; font-size:14px; }
+    button[disabled]{ opacity:.6; cursor:not-allowed; }
+    #hud{ margin-top:8px; font-size:14px; color: var(--muted); }
+    #playersWrap > div { padding:6px 10px; border:1px solid var(--line); border-radius:6px; }
+  </style>
+</head>
+<body>
+  <h1>🎲 Ludo.io — MVP</h1>
+
+  <div class="row">
+    <input id="room" placeholder="Room code (e.g. LUDO)" maxlength="12" />
+    <input id="name" placeholder="Your name" maxlength="16" />
+    <button id="join">Join room</button>
+    <button id="leave" disabled>Leave room</button>
+    <button id="start" disabled>Start game</button>
+  </div>
+
+  <div class="row">
+    <button id="roll" disabled>Roll Dice</button>
+    <span id="hud">Not connected.</span>
+  </div>
+
+  <div class="row" style="align-items:flex-start;">
+    <canvas id="board" width="600" height="600" style="border:1px solid var(--line); border-radius:8px;"></canvas>
+    <div>
+      <div id="playersWrap" class="row" style="max-width:260px"></div>
+      <div id="log" style="margin-top:8px; font-size:12px; color:var(--muted); max-width:260px"></div>
+    </div>
+  </div>
+
+  <h3>How to play (MVP rules)</h3>
+  <ul>
+    <li>4 players max: Red, Blue, Yellow, Green (auto-assigned in join order).</li>
+    <li>Roll a 6 to bring a piece out from your yard to the start. A 6 gives another roll.</li>
+    <li>Click a highlighted piece to move. Landing on an opponent (not on safe squares) sends them back to yard.</li>
+    <li>Exact roll is required to enter the final home cell. First to bring all 4 home wins.</li>
+  </ul>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
